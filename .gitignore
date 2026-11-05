@@ -1,0 +1,15 @@
+# data is shared separately; the test files never leave the instructor
+data/
+datasets/
+
+# instructor only: test evaluation and its guide
+instructor/
+
+# Word guides are shared outside GitHub
+*.docx
+
+# generated
+results/
+submissions/*/artifacts/
+__pycache__/
+~$*
