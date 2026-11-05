@@ -33,7 +33,8 @@ You get two files. Put them in `data/`:
 | `data/symbol5_1m_train.csv.gz` | 1-minute OHLCV of the same period, used only to build labels |
 
 - The first column is the bar open time in UTC. Each row is known at the close of its bar, so no feature looks ahead.
-- `open/high/low/close` are a price index: % moves are real, the price level is not. `volume` is relative (1 = a normal bar).
+- `open/high/low/close` are the real price times one fixed constant, so the series starts near 100. Returns, ratios and % moves are exactly real. The scale is the same across train, test and the 1-minute file, and trading PnL is computed from price ratios. Only the dollar level is hidden, so a raw price level (e.g. "buy if close > 150") has no economic meaning: use changes and ratios (returns, distance to a moving average in %, range / close, ...).
+- `volume` is relative (1 = a normal bar).
 - The other columns are ready-made relative features (see the appendix). Some are NaN at the start of the data.
 
 ## 3. Workflow
