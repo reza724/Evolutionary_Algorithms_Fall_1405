@@ -2,8 +2,11 @@
 data/
 datasets/
 
-# instructor only: test evaluation and its guide
+# instructor only: test evaluation, dataset tools and the instructor guide
 instructor/
+
+# student guide folder (Word guide + sample code zip), shared outside GitHub
+guide/
 
 # Word guides are shared outside GitHub
 *.docx
