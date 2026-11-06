@@ -141,7 +141,6 @@ def make_labels(base, m1, horizon, levels):
         res.loc[miss, fb.columns] = fb.to_numpy()
         res.loc[miss & res["lbl"].notna(), "lbl_source"] = "base"
 
-    res.insert(1, "lbl_name", res["lbl"].map(dict(enumerate(label_names(sorted(levels))))))
     res["lbl"] = res["lbl"].astype("Int64")
     return res, {"timeframe": tf, "window_min": int(horizon * tf / MINUTE), "first_touch_ties_1m": ties,
                  "source": res["lbl_source"].value_counts(dropna=False).to_dict(),
@@ -186,7 +185,8 @@ def main():
           f"same-minute ties {info['first_touch_ties_1m']:,} | base/1m close match {match if match is None else f'{match:.1%}'}")
     if labels["lbl"].isna().any():
         print(f"WARNING: {labels['lbl'].isna().sum():,} rows unlabeled (no 1m coverage and no OHLC columns in base)")
-    print(labels["lbl_name"].value_counts(normalize=True).reindex(label_names(sorted(a.levels))).round(3).to_string())
+    names = dict(enumerate(label_names(sorted(a.levels))))
+    print(labels["lbl"].map(names).value_counts(normalize=True).reindex(label_names(sorted(a.levels))).round(3).to_string())
     print(f"-> {out}")
 
 

@@ -11,8 +11,8 @@ label-only reference is in `LABELS_4CLASS.md`.
 - **Base timeframe:** 5-minute OHLCV with 130 feature columns.
 - **Path resolution:** 1-minute OHLCV, used for entry fills, barrier touches,
   the horizon close and excursion statistics.
-- **Target:** one integer class per 5-minute bar, `lbl ∈ {1, 2, 3, 4}`.
-- **Stored label columns:** only `lbl` and `lbl_name`.
+- **Target:** one integer class per 5-minute bar, `lbl ∈ {-2, -1, 1, 2}`.
+- **Stored label column:** only `lbl` (the class-name mapping is in the JSON sidecar).
 - **Risk settings:** three SL/TP/horizon combinations, each built for both train
   and test — **6 datasets total**.
 - **Original files are not modified.** All labeled datasets are new files with a
@@ -98,19 +98,19 @@ If a barrier is never touched, its index is treated as `W`.
 
 ### 5.2 The four classes
 
-| `lbl` | `lbl_name` | rule |
+| `lbl` | class | rule |
 |---:|---|---|
+| -1 | `true_sl` | `i_SL < i_TP` — SL touched first |
+| -2 | `horizon_sl` | neither barrier touched and `close(entry_time + W - 1) ≤ entry` |
 | 1 | `true_tp` | `i_TP < i_SL` — TP touched first |
-| 2 | `true_sl` | `i_SL < i_TP` — SL touched first |
-| 3 | `horizon_tp` | neither barrier touched and `close(entry_time + W - 1) > entry` |
-| 4 | `horizon_sl` | neither barrier touched and `close(entry_time + W - 1) ≤ entry` |
+| 2 | `horizon_tp` | neither barrier touched and `close(entry_time + W - 1) > entry` |
 
 `close(entry_time + W - 1)` is the close of the last 1-minute bar in the window.
 Since that bar closes at `entry_time + W`, it is the price exactly `H` hours
 after entry.
 
 The flat case (`close == entry`, or a return that rounds to zero at 9 decimals)
-is intentionally assigned to `horizon_sl` (4): it is not a profit.
+is intentionally assigned to `horizon_sl` (-2): it is not a profit.
 
 ### 5.3 Same-minute ties
 
@@ -118,9 +118,9 @@ TP and SL can both be touched inside the same 1-minute candle. The tie is
 resolved with the assumed intra-candle path:
 
 1. If the candle **opens at or above TP**, TP was touched first → label 1.
-2. Else if the candle **opens at or below SL**, SL was touched first → label 2.
+2. Else if the candle **opens at or below SL**, SL was touched first → label -1.
 3. Else if the candle is bullish (`close ≥ open`), assume `O → L → H → C`, so
-   the low (SL) was touched first → label 2.
+   the low (SL) was touched first → label -1.
 4. Else the candle is bearish (`close < open`), assume `O → H → L → C`, so the
    high (TP) was touched first → label 1.
 
@@ -137,22 +137,22 @@ round((low  / entry - 1) × 100, 9) ≤ -SL%
 ```
 
 This makes an exact `1.00 %` or `2.00 %` touch count as a touch instead of
-depending on floating-point noise. The horizon return used for the `3` versus
-`4` decision is rounded the same way, so a return that rounds to `0.0` is
+depending on floating-point noise. The horizon return used for the `2` versus
+`-2` decision is rounded the same way, so a return that rounds to `0.0` is
 treated as flat.
 
-### 5.5 Stored label columns
+### 5.5 Stored label column
 
-Only two label columns are written to each CSV:
+Only one label column is written to each CSV:
 
 | column | meaning |
 |---|---|
-| `lbl` | class 1–4, or `NaN` for an incomplete window |
-| `lbl_name` | `true_tp`, `true_sl`, `horizon_tp`, `horizon_sl` |
+| `lbl` | class -2, -1, 1, 2, or `NaN` for an incomplete window |
 
-The entry price, horizon return, MFE/MAE, touch times and missing-minute count are
-computed internally to decide the class, but they are **not** stored in the final
-datasets.
+The class names (`true_sl`, `horizon_sl`, `true_tp`, `horizon_tp`) are recorded in
+the JSON sidecar. The entry price, horizon return, MFE/MAE, touch times and
+missing-minute count are computed internally to decide the class, but they are
+**not** stored in the final datasets.
 
 ## 6. Risk settings
 
@@ -190,9 +190,9 @@ data/symbol5_5m_test_sl3_tp6_h48.json
 Each CSV contains:
 
 - the original 5-minute dataset: `time` + **130 feature columns**;
-- the **2 label columns** `lbl` and `lbl_name`.
+- the **label column** `lbl`.
 
-Total: **133 columns**, 316,224 rows for train and 52,992 rows for test.
+Total: **132 columns**, 316,224 rows for train and 52,992 rows for test.
 Row order and timestamps are identical to the original 5-minute file.
 
 The `.json` sidecar records:
@@ -207,8 +207,8 @@ The `.json` sidecar records:
 ### 7.3 Unlabeled tail
 
 A label is produced only when the full 1-minute window fits inside the split's
-1-minute file and contains no missing minutes. Otherwise `lbl` and `lbl_name` are
-`NaN`. The number of trailing unlabeled bars is exactly `H × 12`:
+1-minute file and contains no missing minutes. Otherwise `lbl` is `NaN`. The
+number of trailing unlabeled bars is exactly `H × 12`:
 
 | setting | horizon | unlabeled tail (5-minute bars) |
 |---|---:|---:|
@@ -224,19 +224,19 @@ contiguous, to avoid crossing the train/test boundary.
 
 ### Train (316,224 rows)
 
-| setting | true_tp | true_sl | horizon_tp | horizon_sl | unlabeled |
+| setting | -1 true_sl | -2 horizon_sl | 1 true_tp | 2 horizon_tp | unlabeled |
 |---|---:|---:|---:|---:|---:|
-| 1 % / 2 % / 12 h | 53,568 (16.94 %) | 148,958 (47.11 %) | 78,393 (24.79 %) | 35,161 (11.12 %) | 144 (0.05 %) |
-| 2 % / 4 % / 24 h | 34,404 (10.88 %) | 114,942 (36.35 %) | 110,222 (34.86 %) | 56,368 (17.83 %) | 288 (0.09 %) |
-| 3 % / 6 % / 48 h | 33,483 (10.59 %) | 107,268 (33.92 %) | 115,621 (36.56 %) | 59,276 (18.74 %) | 576 (0.18 %) |
+| 1 % / 2 % / 12 h | 148,958 (47.11 %) | 35,161 (11.12 %) | 53,568 (16.94 %) | 78,393 (24.79 %) | 144 (0.05 %) |
+| 2 % / 4 % / 24 h | 114,942 (36.35 %) | 56,368 (17.83 %) | 34,404 (10.88 %) | 110,222 (34.86 %) | 288 (0.09 %) |
+| 3 % / 6 % / 48 h | 107,268 (33.92 %) | 59,276 (18.74 %) | 33,483 (10.59 %) | 115,621 (36.56 %) | 576 (0.18 %) |
 
 ### Test (52,992 rows)
 
-| setting | true_tp | true_sl | horizon_tp | horizon_sl | unlabeled |
+| setting | -1 true_sl | -2 horizon_sl | 1 true_tp | 2 horizon_tp | unlabeled |
 |---|---:|---:|---:|---:|---:|
-| 1 % / 2 % / 12 h | 6,729 (12.70 %) | 20,475 (38.64 %) | 17,334 (32.71 %) | 8,310 (15.68 %) | 144 (0.27 %) |
-| 2 % / 4 % / 24 h | 3,538 (6.68 %) | 13,401 (25.29 %) | 23,238 (43.85 %) | 12,527 (23.64 %) | 288 (0.54 %) |
-| 3 % / 6 % / 48 h | 3,644 (6.88 %) | 12,795 (24.15 %) | 23,014 (43.43 %) | 12,963 (24.46 %) | 576 (1.09 %) |
+| 1 % / 2 % / 12 h | 20,475 (38.64 %) | 8,310 (15.68 %) | 6,729 (12.70 %) | 17,334 (32.71 %) | 144 (0.27 %) |
+| 2 % / 4 % / 24 h | 13,401 (25.29 %) | 12,527 (23.64 %) | 3,538 (6.68 %) | 23,238 (43.85 %) | 288 (0.54 %) |
+| 3 % / 6 % / 48 h | 12,795 (24.15 %) | 12,963 (24.46 %) | 3,644 (6.88 %) | 23,014 (43.43 %) | 576 (1.09 %) |
 
 The imbalance is expected, not a bug:
 
@@ -254,12 +254,12 @@ The following checks were run on all six outputs:
 
 1. **Row/index integrity:** each output has exactly the same rows, order and
    timestamps as its source 5-minute file.
-2. **Column check:** each output has exactly 133 columns, and the only `lbl*`
-   columns are `lbl` and `lbl_name`.
+2. **Column check:** each output has exactly 132 columns, and the only `lbl*`
+   column is `lbl`.
 3. **Time grid:** every consecutive 5-minute timestamp differs by exactly
    `00:05:00`.
-4. **Label domain:** `lbl` is always one of `{1, 2, 3, 4}` or `NaN`, and
-   `lbl_name` is exactly its name mapping.
+4. **Label domain:** `lbl` is always one of `{-2, -1, 1, 2}` or `NaN`; the JSON
+   sidecar maps each class to its name.
 5. **Tail check:** the only unlabeled rows are the trailing `H × 12` bars.
 6. **Brute-force check:** 100 random rows per file were re-labeled with an
    independent row-by-row Python loop that recomputes entry, barriers and the
@@ -312,15 +312,15 @@ df = pd.read_csv(
 # Drop rows whose forward window is incomplete.
 df = df[df["lbl"].notna()].copy()
 
-y = df.pop("lbl").astype(int)          # 1, 2, 3, 4
+y = df.pop("lbl").astype(int)          # -1, -2, 1, 2
 X = df.drop(columns=[c for c in df.columns if c.startswith("lbl")])
 ```
 
 Important:
 
-- **The label columns look into the future.** Use `lbl` and `lbl_name` only as
-  targets or for analysis, never as model inputs. The `lbl` prefix is
-  deliberately excluded by `bench.features_only`.
+- **The label column looks into the future.** Use `lbl` only as a target or for
+  analysis, never as a model input. The `lbl` prefix is deliberately excluded by
+  `bench.features_only`.
 - **Do not split randomly.** Adjacent 5-minute bars have overlapping forward
   windows. For time-series validation, leave a gap of at least `H × 12` bars
   between the training and validation parts.

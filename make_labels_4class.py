@@ -4,10 +4,10 @@ The labels describe a long entry made at the open of the first 1-minute bar afte
 the 5-minute bar closes.  For a risk setting SL%, TP%, H hours, every base bar gets
 exactly one of four labels:
 
+   -1  true_sl      the SL barrier (-SL%) is touched before the TP barrier (+TP%)
+   -2  horizon_sl   neither barrier is touched and close at the horizon is <= entry
     1  true_tp      the TP barrier (+TP%) is touched before the SL barrier (-SL%)
-    2  true_sl      the SL barrier (-SL%) is touched before the TP barrier (+TP%)
-    3  horizon_tp   neither barrier is touched and close at the horizon is > entry
-    4  horizon_sl   neither barrier is touched and close at the horizon is <= entry
+    2  horizon_tp   neither barrier is touched and close at the horizon is > entry
 
 The window is H * 60 one-minute bars starting at the entry minute.  The close of the
 last bar in that window is the price H hours after entry.  A same-minute tie between
@@ -24,8 +24,8 @@ Run from the repository root:
     python make_labels_4class.py --base data/symbol5_5m_train.csv \
         --minute data/symbol5_1m_train.csv --sl 1 --tp 2 --horizon 12
 
-The output is the full base dataset with only two label columns appended - lbl
-(class 1..4) and lbl_name - plus a small JSON sidecar with the risk setting and label
+The output is the full base dataset with only one label column appended - lbl
+(classes -1, -2, 1, 2) - plus a small JSON sidecar with the risk setting and label
 counts.  The original files are never touched.
 """
 import argparse
@@ -39,7 +39,7 @@ from numpy.lib.stride_tricks import sliding_window_view
 
 TIME_COLS = ("time", "datetime", "date", "timestamp", "open_time")
 MINUTE = pd.Timedelta("1min")
-LABEL_NAMES = {1: "true_tp", 2: "true_sl", 3: "horizon_tp", 4: "horizon_sl"}
+LABEL_NAMES = {-1: "true_sl", -2: "horizon_sl", 1: "true_tp", 2: "horizon_tp"}
 SETTINGS = (
     # name,           SL %, TP %, horizon (hours)
     ("sl1_tp2_h12",   1.0,  2.0,  12),
@@ -157,11 +157,10 @@ def label_path(times, tf, fine, horizon_minutes, sl_pct, tp_pct, chunk_cells=2_0
                 ties += int(tie.sum())
 
             no_touch = (tp_first == W) & (sl_first == W)
-            lbl[i] = np.where(no_touch, np.where(ret > 0, 3, 4),
-                              np.where(first_is_tp, 1, 2)).astype(float)
+            lbl[i] = np.where(no_touch, np.where(ret > 0, 2, -2),
+                              np.where(first_is_tp, 1, -1)).astype(float)
 
     labels = pd.DataFrame({"lbl": lbl}, index=times)
-    labels["lbl_name"] = labels["lbl"].map(LABEL_NAMES)
     labels["lbl"] = labels["lbl"].astype("Int64")
     return labels, {"window_min": int(horizon_minutes), "window_bars_1m": W,
                     "same_minute_ties": ties}
@@ -185,7 +184,7 @@ def write_one(base, m1, out_path, sl_pct, tp_pct, horizon_hours, name, match, sp
     base.to_csv(out_path, na_rep="")
     base.drop(columns=list(labels.columns), inplace=True)
 
-    counts = labels["lbl_name"].value_counts(dropna=False).to_dict()
+    counts = labels["lbl"].map(LABEL_NAMES).value_counts(dropna=False).to_dict()
     meta = {
         "symbol": base.attrs.get("symbol", "symbol5"),
         "setting": name,
@@ -199,8 +198,8 @@ def write_one(base, m1, out_path, sl_pct, tp_pct, horizon_hours, name, match, sp
             "horizon_minutes": int(horizon_hours * 60),
         },
         "labels": LABEL_NAMES,
-        "label_columns": ["lbl", "lbl_name"],
-        "flat_horizon_rule": "close == entry -> horizon_sl (4)",
+        "label_columns": ["lbl"],
+        "flat_horizon_rule": "close == entry -> horizon_sl (-2)",
         "tie_break": ("same 1m candle: open beyond a barrier wins; else bullish O->L->H->C "
                       "(SL first) and bearish O->H->L->C (TP first)"),
         "time_convention_check": match,
