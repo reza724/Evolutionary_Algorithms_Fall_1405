@@ -1,7 +1,7 @@
 # data is shared separately; the test files never leave the instructor
 data/
 datasets/
-
+.venv/
 # instructor only: test evaluation, dataset tools and the instructor guide
 instructor/
 
