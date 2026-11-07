@@ -1,4 +1,4 @@
-"""Independent re-derivation of the four-class labels straight from raw Binance klines.
+"""Independent re-derivation of the three-class labels straight from raw Binance klines.
 
 Cross-check of the labeled benchmark datasets (data/symbol5_5m_{split}_benchmark_{1,2,3}.csv):
 
@@ -6,7 +6,7 @@ Cross-check of the labeled benchmark datasets (data/symbol5_5m_{split}_benchmark
     separate download from the shipped symbol5_1m_*.csv, scaled to the course price scale
     (real price * 8/27 = 1/3.375); the files are re-downloaded automatically if missing;
   * the resolver is time-major - it sweeps the horizon minute by minute over all rows -
-    instead of the row-major sliding windows in make_labels_4class.py;
+    instead of the row-major sliding windows in make_labels_3class.py;
   * brute() re-derives labels for random rows with an explicit per-row loop, on the SHIPPED
     1-minute path (so every audited row is checked against the generator's own input).
 
@@ -98,12 +98,13 @@ def read_grids():
 
 
 def label_time_major(times, grid, tf_min, horizon_min, sl_pct, tp_pct):
-    """Four-class resolution, minute-major sweep over `times` (5m bar open times).
+    """Three-class resolution, minute-major sweep over `times` (5m bar open times).
 
     tp_first / sl_first keep the earliest touch minute (0-based from the entry minute),
-    or W+1 when a barrier is never touched inside the window. Same-minute ties resolve by
-    the candle path: open beyond a barrier wins, else bull O->L->H->C puts SL first and
-    bear O->H->L->C puts TP first (the make_labels.py convention).
+    or W+1 when a barrier is never touched inside the window. The first barrier touched
+    decides: TP -> 1, SL -> -1, neither -> 0. Same-minute ties resolve by the candle
+    path: open beyond a barrier wins, else bull O->L->H->C puts SL first and bear
+    O->H->L->C puts TP first (the make_labels.py convention).
     """
     W = int(horizon_min)
     s = ((pd.DatetimeIndex(times) - grid.index[0]) // MINUTE).to_numpy(dtype=np.int64) + int(tf_min)
@@ -130,11 +131,9 @@ def label_time_major(times, grid, tf_min, horizon_min, sl_pct, tp_pct):
     first_tp = valid & (tp_first < sl_first)
     first_sl = valid & (sl_first < tp_first)
     lbl[first_tp], lbl[first_sl] = 1, -1
-    tail = c[np.clip(s[valid] + W - 1, 0, len(o) - 1)]
-    ret = np.round((tail / e[valid] - 1) * 100, 9)
     tie = valid & (tp_first == sl_first) & (tp_first <= W)
     none = valid & ~first_tp & ~first_sl & ~tie
-    lbl[none] = np.where(ret[none[valid]] > 0, 2, -2)
+    lbl[none] = 0
     ti = s[tie] + tp_first[tie]
     ob, cb = o[ti], c[ti]
     tp_w = (ob >= e[tie] * (1 + tp_pct / 100)) | ((ob > e[tie] * (1 - sl_pct / 100)) & (cb < ob))
@@ -143,7 +142,10 @@ def label_time_major(times, grid, tf_min, horizon_min, sl_pct, tp_pct):
 
 
 def brute(times, grid, idx, tf_min, horizon_min, sl_pct, tp_pct):
-    """Explicit per-row scan; the trade exits at the first barrier it touches there."""
+    """Explicit per-row scan; the trade exits at the first barrier it touches there.
+
+    Result: 1 = TP hit first, -1 = SL hit first, 0 = neither barrier inside the window.
+    """
     W = int(horizon_min)
     o, h, l, c = (grid[k].to_numpy(dtype=float) for k in ("open", "high", "low", "close"))
     out = np.full(len(idx), np.nan)
@@ -174,8 +176,7 @@ def brute(times, grid, idx, tf_min, horizon_min, sl_pct, tp_pct):
             else:
                 continue
             break                                       # first touch decides
-        out[j] = 1.0 if ft is not None else -1.0 if fs is not None else \
-            2.0 if np.isfinite(c[s + W - 1]) and np.round((c[s + W - 1] / e - 1) * 100, 9) > 0 else -2.0
+        out[j] = 1.0 if ft is not None else -1.0 if fs is not None else 0.0
     return out
 
 
@@ -228,6 +229,8 @@ def main():
             bnan = int(np.sum(np.isnan(b) != np.isnan(new[pick])))
             audit_bad = 0
             for i in np.flatnonzero(bad):                            # keep only non-flip disagreements
+                if np.isnan(b[i]) or np.isnan(new[pick[i]]):
+                    continue                                         # NaN-pattern rows are the bnan count
                 i0 = s_raw[pick[i]]
                 seg_h, seg_l = h_raw[i0:i0 + W], l_raw[i0:i0 + W]
                 with np.errstate(invalid="ignore"):

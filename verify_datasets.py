@@ -9,6 +9,7 @@ Checks, on every row (no sampling):
 3. Aggregating the 1-minute OHLCV to 5-minute bars reproduces the source 5-minute
    open/high/low/close exactly.  This proves the 1-minute labels were built from
    the same scaled price series as the 5-minute features.
+4. lbl is always one of {-1, 0, 1}, and only the trailing H * 12 bars are NaN.
 
 Volume is also reported.  The 5-minute volume is a fixed multiple of the
 1-minute volume sum; it is not used by the labeler (labels use OHLC only).
@@ -25,7 +26,12 @@ import numpy as np
 import pandas as pd
 
 OHLCV = ["open", "high", "low", "close", "volume"]
-SETTINGS = ("sl1_tp2_h12", "sl2_tp4_h24", "sl3_tp6_h48")
+SETTINGS = {
+    "benchmark_1": ("sl1_tp2_h12", 1.0, 2.0, 12),
+    "benchmark_2": ("sl2_tp4_h24", 2.0, 4.0, 24),
+    "benchmark_3": ("sl3_tp6_h48", 3.0, 6.0, 48),
+}
+LABEL_CLASSES = {-1.0, 0.0, 1.0}
 
 
 def read_ohlcv(path):
@@ -57,12 +63,15 @@ def fmt(res):
 
 def check_split(data_dir, symbol, split, failures):
     base_path = data_dir / f"{symbol}_5m_{split}.csv"
+    if not base_path.exists():                     # benchmark_1 is the canonical feature source
+        base_path = data_dir / f"{symbol}_5m_{split}_benchmark_1.csv"
     minute_path = data_dir / f"{symbol}_1m_{split}.csv"
     print(f"\n=== {split} ===")
     if not base_path.exists() or not minute_path.exists():
         print(f"SKIP: missing {base_path.name} or {minute_path.name}")
         return
 
+    print(f"source 5m: {base_path.name}")
     base = read_ohlcv(base_path)
     m1 = read_ohlcv(minute_path)
     print(f"5m rows: {len(base):,} | 1m rows: {len(m1):,} | "
@@ -83,17 +92,34 @@ def check_split(data_dir, symbol, split, failures):
           f"min {ratio.min():.9f}, max {ratio.max():.9f}, std {ratio.std():.3e} "
           f"(constant normalization; volume is not used for labels)")
 
-    for setting in SETTINGS:
-        path = data_dir / f"{symbol}_5m_{split}_{setting}.csv"
+    for benchmark, (setting, sl, tp, hours) in SETTINGS.items():
+        path = data_dir / f"{symbol}_5m_{split}_{benchmark}.csv"
         if not path.exists():
-            failures.append(f"{split}/{setting}: missing {path.name}")
+            failures.append(f"{split}/{benchmark}: missing {path.name}")
             continue
         lab = read_ohlcv(path)
         if not lab.index.equals(base.index):
-            failures.append(f"{split}/{setting}: timestamps differ from base")
+            failures.append(f"{split}/{benchmark}: timestamps differ from base")
             continue
-        print(f"labeled {setting} vs source 5m:")
-        print(" ", fmt(compare(lab, base, OHLCV, f"{split}/{setting}", failures)))
+        print(f"labeled {benchmark} ({setting}) vs source 5m:")
+        print(" ", fmt(compare(lab, base, OHLCV, f"{split}/{benchmark}", failures)))
+
+        labels = pd.read_csv(path, usecols=["time", "lbl"], parse_dates=["time"])
+        labels = labels.set_index("time").sort_index()
+        if not labels.index.equals(base.index):
+            failures.append(f"{split}/{benchmark}: label timestamps differ from base")
+            continue
+        lbl = labels["lbl"]
+        bad = lbl.dropna()
+        invalid = int((~bad.isin(LABEL_CLASSES)).sum())
+        if invalid:
+            failures.append(f"{split}/{benchmark}: {invalid} labels outside {{-1, 0, 1}}")
+        tail = int(hours * 12)
+        if lbl.iloc[-tail:].notna().any() or lbl.iloc[:-tail].isna().any():
+            failures.append(f"{split}/{benchmark}: unlabeled rows are not exactly the trailing {tail} bars")
+        counts = lbl.value_counts(dropna=False)
+        summary = " ".join(f"{k:g}: {v:,}" for k, v in counts.items())
+        print(f"  lbl {summary} | tail NaN {int(lbl.iloc[-tail:].isna().sum()):,}")
 
 
 def main():

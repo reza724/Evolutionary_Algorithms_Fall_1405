@@ -1,31 +1,36 @@
-# DATASETS.md — how the 4-class 5-minute datasets were created
+# DATASETS.md — how the 3-class 5-minute datasets were created
 
 This document describes the full construction pipeline for the six labeled
-5-minute datasets in `data/`. The generator is `make_labels_4class.py`; a shorter
-label-only reference is in `LABELS_4CLASS.md`.
+5-minute datasets in `data/`. The generator is `make_labels_3class.py`; a shorter
+label-only reference is in `LABELS_3CLASS.md`.
 
 ## 1. Summary
 
 - **Symbol:** Binance `BNBUSDT`, anonymized and rescaled in the course data as
   `symbol5`.
 - **Base timeframe:** 5-minute OHLCV with 130 feature columns.
-- **Path resolution:** 1-minute OHLCV, used for entry fills, barrier touches,
-  the horizon close and excursion statistics.
-- **Target:** one integer class per 5-minute bar, `lbl ∈ {-2, -1, 1, 2}`.
+- **Path resolution:** 1-minute OHLCV, used for entry fills and barrier touches.
+- **Target:** one integer class per 5-minute bar, `lbl ∈ {-1, 0, 1}`.
 - **Stored label column:** only `lbl` (the class-name mapping is in the JSON sidecar).
 - **Risk settings:** three SL/TP/horizon combinations, each built for both train
   and test — **6 datasets total**.
-- **Original files are not modified.** All labeled datasets are new files with a
-  suffix describing the risk setting.
+- **Feature columns are not modified.** Each file is the complete feature dataset
+  with only the `lbl` column replaced; feature values are identical to the
+  source 5-minute data.
 
 ## 2. Input files
 
 | file | role | rows | period (UTC) |
 |---|---|---:|---|
-| `data/symbol5_5m_train.csv` | base train bars + features | 316,224 | 2023-05-01 00:00 → 2026-05-02 23:55 |
-| `data/symbol5_5m_test.csv` | base test bars + features | 52,992 | 2026-05-03 00:00 → 2026-11-02 23:55 |
+| `data/symbol5_5m_train_benchmark_{1,2,3}.csv` | base train bars + features | 316,224 | 2023-05-01 00:00 → 2026-05-02 23:55 |
+| `data/symbol5_5m_test_benchmark_{1,2,3}.csv` | base test bars + features | 52,992 | 2026-05-03 00:00 → 2026-11-02 23:55 |
 | `data/symbol5_1m_train.csv` | 1-minute path for train labels | 1,624,320 | 2023-04-01 00:00 → 2026-05-02 23:59 |
 | `data/symbol5_1m_test.csv` | 1-minute path for test labels | 264,960 | 2026-05-03 00:00 → 2026-11-02 23:59 |
+
+The three benchmark files of a split share identical feature columns; they differ
+only in the risk-setting label they store. The unlabeled source file
+(`symbol5_5m_{split}.csv`) is not distributed separately — `benchmark_1` is the
+canonical feature source used by the verification scripts.
 
 Both 1-minute files are complete minute grids: every consecutive timestamp is
 exactly one minute apart, with no duplicates and no missing minutes. The extra
@@ -35,9 +40,8 @@ forward labels; the first 5-minute train bar is May 2023.
 ### Price and volume scaling
 
 The course data is the real BNB price multiplied by a fixed constant. The labeler
-only uses ratios (`high / entry`, `low / entry`, `close / entry`) and percentages,
-so the scale cancels out. Nothing in the label construction depends on the dollar
-price level.
+only uses ratios (`high / entry`, `low / entry`) and percentages, so the scale
+cancels out. Nothing in the label construction depends on the dollar price level.
 
 ## 3. Binance source verification
 
@@ -96,21 +100,18 @@ Let:
 
 If a barrier is never touched, its index is treated as `W`.
 
-### 5.2 The four classes
+### 5.2 The three classes
 
 | `lbl` | class | rule |
 |---:|---|---|
-| -1 | `true_sl` | `i_SL < i_TP` — SL touched first |
-| -2 | `horizon_sl` | neither barrier touched and `close(entry_time + W - 1) ≤ entry` |
-| 1 | `true_tp` | `i_TP < i_SL` — TP touched first |
-| 2 | `horizon_tp` | neither barrier touched and `close(entry_time + W - 1) > entry` |
+| -1 | `hit_sl` | `i_SL < i_TP` — SL touched first |
+| 0 | `no_hit` | neither barrier touched inside the window |
+| 1 | `hit_tp` | `i_TP < i_SL` — TP touched first |
 
-`close(entry_time + W - 1)` is the close of the last 1-minute bar in the window.
-Since that bar closes at `entry_time + W`, it is the price exactly `H` hours
-after entry.
-
-The flat case (`close == entry`, or a return that rounds to zero at 9 decimals)
-is intentionally assigned to `horizon_sl` (-2): it is not a profit.
+The close at the horizon is **not** used for the class decision. If neither
+barrier is touched, the label is `0` whether the horizon close is above, below
+or exactly at entry. This is the only difference from the earlier four-class
+scheme, where the two horizon outcomes were split into `-2` and `2`.
 
 ### 5.3 Same-minute ties
 
@@ -137,9 +138,7 @@ round((low  / entry - 1) × 100, 9) ≤ -SL%
 ```
 
 This makes an exact `1.00 %` or `2.00 %` touch count as a touch instead of
-depending on floating-point noise. The horizon return used for the `2` versus
-`-2` decision is rounded the same way, so a return that rounds to `0.0` is
-treated as flat.
+depending on floating-point noise.
 
 ### 5.5 Stored label column
 
@@ -147,20 +146,20 @@ Only one label column is written to each CSV:
 
 | column | meaning |
 |---|---|
-| `lbl` | class -2, -1, 1, 2, or `NaN` for an incomplete window |
+| `lbl` | class -1, 0, 1, or `NaN` for an incomplete window |
 
-The class names (`true_sl`, `horizon_sl`, `true_tp`, `horizon_tp`) are recorded in
-the JSON sidecar. The entry price, horizon return, MFE/MAE, touch times and
-missing-minute count are computed internally to decide the class, but they are
-**not** stored in the final datasets.
+The class names (`hit_sl`, `no_hit`, `hit_tp`) are recorded in the JSON sidecar.
+The entry price, first-touch indices and missing-minute count are computed
+internally to decide the class, but they are **not** stored in the final
+datasets.
 
 ## 6. Risk settings
 
-| setting | SL | TP | horizon | horizon in 5-minute bars | horizon in 1-minute bars |
-|---|---:|---:|---:|---:|---:|
-| `sl1_tp2_h12` | 1 % | 2 % | 12 h | 144 | 720 |
-| `sl2_tp4_h24` | 2 % | 4 % | 24 h | 288 | 1,440 |
-| `sl3_tp6_h48` | 3 % | 6 % | 48 h | 576 | 2,880 |
+| setting | benchmark | SL | TP | horizon | horizon in 5-minute bars | horizon in 1-minute bars |
+|---|---|---:|---:|---:|---:|---:|
+| `sl1_tp2_h12` | `benchmark_1` | 1 % | 2 % | 12 h | 144 | 720 |
+| `sl2_tp4_h24` | `benchmark_2` | 2 % | 4 % | 24 h | 288 | 1,440 |
+| `sl3_tp6_h48` | `benchmark_3` | 3 % | 6 % | 48 h | 576 | 2,880 |
 
 All three use a 1:2 risk-reward ratio: TP is twice SL.
 
@@ -169,20 +168,20 @@ All three use a 1:2 risk-reward ratio: TP is twice SL.
 ### 7.1 Naming
 
 ```
-data/symbol5_5m_{split}_{setting}.csv
-data/symbol5_5m_{split}_{setting}.json
+data/symbol5_5m_{split}_benchmark_{1,2,3}.csv
+data/symbol5_5m_{split}_benchmark_{1,2,3}.json
 ```
 
-`split` is `train` or `test`. `setting` is `sl1_tp2_h12`, `sl2_tp4_h24` or
-`sl3_tp6_h48`.
+`split` is `train` or `test`. The benchmark number maps to the risk setting as
+shown in section 6.
 
 Example:
 
 ```
-data/symbol5_5m_train_sl1_tp2_h12.csv
-data/symbol5_5m_train_sl1_tp2_h12.json
-data/symbol5_5m_test_sl3_tp6_h48.csv
-data/symbol5_5m_test_sl3_tp6_h48.json
+data/symbol5_5m_train_benchmark_1.csv
+data/symbol5_5m_train_benchmark_1.json
+data/symbol5_5m_test_benchmark_3.csv
+data/symbol5_5m_test_benchmark_3.json
 ```
 
 ### 7.2 Columns
@@ -197,10 +196,10 @@ Row order and timestamps are identical to the original 5-minute file.
 
 The `.json` sidecar records:
 
-- symbol, split, setting and timeframe;
+- symbol, dataset name, split, setting and timeframe;
 - SL / TP / horizon;
 - label names and counts;
-- the flat-horizon and tie-break rules;
+- the barrier and tie-break rules;
 - the time-convention check result;
 - the number of same-minute ties.
 
@@ -212,9 +211,9 @@ number of trailing unlabeled bars is exactly `H × 12`:
 
 | setting | horizon | unlabeled tail (5-minute bars) |
 |---|---:|---:|
-| `sl1_tp2_h12` | 12 h | 144 |
-| `sl2_tp4_h24` | 24 h | 288 |
-| `sl3_tp6_h48` | 48 h | 576 |
+| `benchmark_1` | 12 h | 144 |
+| `benchmark_2` | 24 h | 288 |
+| `benchmark_3` | 48 h | 576 |
 
 The train and test splits are labeled independently. The last train bars are
 **not** labeled using the test 1-minute file, even though the files are
@@ -224,26 +223,26 @@ contiguous, to avoid crossing the train/test boundary.
 
 ### Train (316,224 rows)
 
-| setting | -1 true_sl | -2 horizon_sl | 1 true_tp | 2 horizon_tp | unlabeled |
-|---|---:|---:|---:|---:|---:|
-| 1 % / 2 % / 12 h | 148,958 (47.11 %) | 35,161 (11.12 %) | 53,568 (16.94 %) | 78,393 (24.79 %) | 144 (0.05 %) |
-| 2 % / 4 % / 24 h | 114,942 (36.35 %) | 56,368 (17.83 %) | 34,404 (10.88 %) | 110,222 (34.86 %) | 288 (0.09 %) |
-| 3 % / 6 % / 48 h | 107,268 (33.92 %) | 59,276 (18.74 %) | 33,483 (10.59 %) | 115,621 (36.56 %) | 576 (0.18 %) |
+| benchmark | -1 hit_sl | 0 no_hit | 1 hit_tp | unlabeled |
+|---|---:|---:|---:|---:|
+| `benchmark_1` (1 % / 2 % / 12 h) | 148,958 (47.11 %) | 113,554 (35.91 %) | 53,568 (16.94 %) | 144 (0.05 %) |
+| `benchmark_2` (2 % / 4 % / 24 h) | 114,942 (36.35 %) | 166,590 (52.68 %) | 34,404 (10.88 %) | 288 (0.09 %) |
+| `benchmark_3` (3 % / 6 % / 48 h) | 107,268 (33.92 %) | 174,897 (55.31 %) | 33,483 (10.59 %) | 576 (0.18 %) |
 
 ### Test (52,992 rows)
 
-| setting | -1 true_sl | -2 horizon_sl | 1 true_tp | 2 horizon_tp | unlabeled |
-|---|---:|---:|---:|---:|---:|
-| 1 % / 2 % / 12 h | 20,475 (38.64 %) | 8,310 (15.68 %) | 6,729 (12.70 %) | 17,334 (32.71 %) | 144 (0.27 %) |
-| 2 % / 4 % / 24 h | 13,401 (25.29 %) | 12,527 (23.64 %) | 3,538 (6.68 %) | 23,238 (43.85 %) | 288 (0.54 %) |
-| 3 % / 6 % / 48 h | 12,795 (24.15 %) | 12,963 (24.46 %) | 3,644 (6.88 %) | 23,014 (43.43 %) | 576 (1.09 %) |
+| benchmark | -1 hit_sl | 0 no_hit | 1 hit_tp | unlabeled |
+|---|---:|---:|---:|---:|
+| `benchmark_1` (1 % / 2 % / 12 h) | 20,475 (38.64 %) | 25,644 (48.39 %) | 6,729 (12.70 %) | 144 (0.27 %) |
+| `benchmark_2` (2 % / 4 % / 24 h) | 13,401 (25.29 %) | 35,765 (67.49 %) | 3,538 (6.68 %) | 288 (0.54 %) |
+| `benchmark_3` (3 % / 6 % / 48 h) | 12,795 (24.15 %) | 35,977 (67.89 %) | 3,644 (6.88 %) | 576 (1.09 %) |
 
 The imbalance is expected, not a bug:
 
 - with a 1:2 risk-reward ratio, the nearer SL is hit more often than the farther
   TP;
-- longer horizons leave more windows with no barrier touch, so the two horizon
-  classes grow and the true-touch classes shrink as a share of all rows.
+- longer horizons leave more windows with no barrier touch, so `no_hit` grows
+  and the touch classes shrink as a share of all rows.
 
 For modelling, prefer macro-F1, balanced accuracy or class weights over plain
 accuracy.
@@ -258,36 +257,40 @@ The following checks were run on all six outputs:
    column is `lbl`.
 3. **Time grid:** every consecutive 5-minute timestamp differs by exactly
    `00:05:00`.
-4. **Label domain:** `lbl` is always one of `{-2, -1, 1, 2}` or `NaN`; the JSON
+4. **Label domain:** `lbl` is always one of `{-1, 0, 1}` or `NaN`; the JSON
    sidecar maps each class to its name.
 5. **Tail check:** the only unlabeled rows are the trailing `H × 12` bars.
-6. **Brute-force check:** 100 random rows per file were re-labeled with an
-   independent row-by-row Python loop that recomputes entry, barriers and the
-   horizon close from the 1-minute file. All matched.
-7. **Source check:** Binance return correlation, price scale, volume scale and
+6. **Generator equivalence:** the new three-class labels were compared row by row
+   with the previous four-class labels after the intended mapping
+   (`-1 → -1`, `1 → 1`, `-2 → 0`, `2 → 0`); all six files matched with zero
+   disagreements.
+7. **Independent re-derivation:** `verify_labels_from_binance.py` resolves the
+   labels time-major from the raw Binance 1-minute klines (a separate download)
+   and audits random rows with an explicit per-row brute-force resolver.
+8. **Source check:** Binance return correlation, price scale, volume scale and
    complete 1-minute grids, as described in section 3.
-8. **Time convention:** 100 % of 5-minute closes equal the 1-minute close at the
+9. **Time convention:** 100 % of 5-minute closes equal the 1-minute close at the
    bar's last minute, confirming the open-time convention.
 
 ### OHLCV consistency check
 
 `verify_datasets.py` compares **every row** (no sampling) of every labeled file
-against the source 5-minute file, and compares the source 5-minute OHLC against
-the 1-minute OHLC aggregated to 5-minute bars.
+against the canonical 5-minute feature file (`benchmark_1`), and compares the
+source 5-minute OHLC against the 1-minute OHLC aggregated to 5-minute bars.
 
 Result for both train and test:
 
 | check | result |
 |---|---|
-| labeled `open/high/low/close/volume` vs source 5-minute values | identical, max absolute difference `0.0` |
+| labeled `open/high/low/close/volume` vs canonical 5-minute values | identical, max absolute difference `0.0` |
 | 1-minute OHLC aggregated to 5-minute vs source 5-minute OHLC | identical, max absolute difference `0.0` |
 | 1-minute volume sum vs 5-minute volume | fixed ratio `0.200117985`; volume is not used by the labeler |
 
 This is the important scale check: the labeled dataset prices are exactly the
 original relative/scaled 5-minute prices, and the 1-minute path used for the
 labels is on that same scale. The labeler only uses percentage moves
-(`high / entry`, `low / entry`, `close / entry`), so the common scale cancels
-out. No raw Binance dollar prices were mixed into the labels.
+(`high / entry`, `low / entry`), so the common scale cancels out. No raw Binance
+dollar prices were mixed into the labels.
 
 The volume ratio is a constant normalization between the two files; it varies by
 only about `3 × 10⁻⁹` and has no effect on TP/SL labels because labels use OHLC
@@ -305,14 +308,14 @@ python verify_datasets.py
 import pandas as pd
 
 df = pd.read_csv(
-    "data/symbol5_5m_train_sl1_tp2_h12.csv",
+    "data/symbol5_5m_train_benchmark_1.csv",
     parse_dates=["time"],
 )
 
 # Drop rows whose forward window is incomplete.
 df = df[df["lbl"].notna()].copy()
 
-y = df.pop("lbl").astype(int)          # -1, -2, 1, 2
+y = df.pop("lbl").astype(int)          # -1, 0, 1
 X = df.drop(columns=[c for c in df.columns if c.startswith("lbl")])
 ```
 
@@ -326,10 +329,10 @@ Important:
   between the training and validation parts.
 - **These are long-side labels.** TP is above entry and SL is below entry. For a
   short-side target, mirror the barriers and build a separate label column; do
-  not reuse `true_tp` / `true_sl` for both directions.
-- **Only the class is stored.** Entry price, horizon return, MFE/MAE and touch
-  times are computed internally but not written. Recompute them from the
-  1-minute data if you need them for analysis.
+  not reuse `hit_tp` / `hit_sl` for both directions.
+- **Only the class is stored.** Entry price and touch times are computed
+  internally but not written. Recompute them from the 1-minute data if you need
+  them for analysis.
 - **The datasets are standalone.** `bench.py` loads the original course files
   (`data/symbol5_5m_{split}.csv.gz` in the standard layout), not these labeled
   copies; these files are meant for custom data loaders. `bench.LabelModel`
@@ -341,29 +344,31 @@ Important:
 From the repository root:
 
 ```bash
-python make_labels_4class.py --all
+python make_labels_3class.py --all
 ```
 
-This builds all six datasets and their JSON sidecars. It takes about 2 minutes
-and needs roughly 1.4 GB of free disk space for the six CSVs. Dependencies are
-only `numpy` and `pandas`.
+This relabels all six benchmark datasets in place and writes a fresh JSON
+sidecar next to each CSV. It takes a few minutes and needs roughly 1.4 GB of
+free disk space for temporary copies. Dependencies are only `numpy` and
+`pandas`.
 
 To build one file:
 
 ```bash
-python make_labels_4class.py \
-  --base data/symbol5_5m_train.csv \
+python make_labels_3class.py \
+  --base data/symbol5_5m_train_benchmark_1.csv \
   --minute data/symbol5_1m_train.csv \
   --sl 1 --tp 2 --horizon 12 \
-  --out data/symbol5_5m_train_sl1_tp2_h12.csv
+  --out data/symbol5_5m_train_benchmark_1.csv
 ```
 
 ### Related files
 
 | file | purpose |
 |---|---|
-| `make_labels_4class.py` | generator for the four-class datasets |
-| `verify_datasets.py` | all-row OHLCV / 1m-to-5m scale verification |
-| `LABELS_4CLASS.md` | shorter label-only reference |
+| `make_labels_3class.py` | generator for the three-class datasets |
+| `verify_datasets.py` | all-row OHLCV / 1m-to-5m scale and label-domain verification |
+| `LABELS_3CLASS.md` | shorter label-only reference |
+| `verify_labels_from_binance.py` | independent time-major label re-derivation from raw Binance klines |
 | `make_labels.py` | original six-class TP/SL labeler used by `bench.py` |
 | `bench.py` | trading environment, model contract and scoring |

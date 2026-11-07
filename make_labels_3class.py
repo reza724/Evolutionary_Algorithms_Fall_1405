@@ -1,36 +1,38 @@
-"""Four-class TP/SL labels for 5-minute bars, resolved on 1-minute OHLCV.
+"""Three-class TP/SL labels for 5-minute bars, resolved on 1-minute OHLCV.
 
 The labels describe a long entry made at the open of the first 1-minute bar after
 the 5-minute bar closes.  For a risk setting SL%, TP%, H hours, every base bar gets
-exactly one of four labels:
+exactly one of three labels:
 
-   -1  true_sl      the SL barrier (-SL%) is touched before the TP barrier (+TP%)
-   -2  horizon_sl   neither barrier is touched and close at the horizon is <= entry
-    1  true_tp      the TP barrier (+TP%) is touched before the SL barrier (-SL%)
-    2  horizon_tp   neither barrier is touched and close at the horizon is > entry
+   -1  hit_sl   the SL barrier (-SL%) is touched before the TP barrier (+TP%)
+    0  no_hit   neither barrier is touched inside the window
+    1  hit_tp   the TP barrier (+TP%) is touched before the SL barrier (-SL%)
 
-The window is H * 60 one-minute bars starting at the entry minute.  The close of the
-last bar in that window is the price H hours after entry.  A same-minute tie between
-TP and SL is resolved with the 1-minute candle path: a gap through a barrier at the
-open wins first; otherwise a bullish candle is O->L->H->C (SL first) and a bearish
-candle is O->H->L->C (TP first) - the same convention as make_labels.py.
+The window is H * 60 one-minute bars starting at the entry minute.  A same-minute
+tie between TP and SL is resolved with the 1-minute candle path: a gap through a
+barrier at the open wins first; otherwise a bullish candle is O->L->H->C (SL
+first) and a bearish candle is O->H->L->C (TP first) - the same convention as
+make_labels.py.
 
 Rows whose full window is not covered by the 1-minute file (or has missing minutes)
 get lbl = NaN, so they can be dropped safely.
 
 Run from the repository root:
 
-    python make_labels_4class.py --all
-    python make_labels_4class.py --base data/symbol5_5m_train.csv \
+    python make_labels_3class.py --all
+    python make_labels_3class.py --base data/symbol5_5m_train_benchmark_1.csv \
         --minute data/symbol5_1m_train.csv --sl 1 --tp 2 --horizon 12
 
 The output is the full base dataset with only one label column appended - lbl
-(classes -1, -2, 1, 2) - plus a small JSON sidecar with the risk setting and label
-counts.  The original files are never touched.
+(classes -1, 0, 1) - plus a small JSON sidecar with the risk setting and label
+counts.  With --all the six benchmark datasets are relabeled in place (each file
+is written through a temporary copy first).  The feature columns are never
+modified.
 """
 import argparse
 import gc
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -39,12 +41,12 @@ from numpy.lib.stride_tricks import sliding_window_view
 
 TIME_COLS = ("time", "datetime", "date", "timestamp", "open_time")
 MINUTE = pd.Timedelta("1min")
-LABEL_NAMES = {-1: "true_sl", -2: "horizon_sl", 1: "true_tp", 2: "horizon_tp"}
+LABEL_NAMES = {-1: "hit_sl", 0: "no_hit", 1: "hit_tp"}
 SETTINGS = (
-    # name,           SL %, TP %, horizon (hours)
-    ("sl1_tp2_h12",   1.0,  2.0,  12),
-    ("sl2_tp4_h24",   2.0,  4.0,  24),
-    ("sl3_tp6_h48",   3.0,  6.0,  48),
+    # name,           SL %, TP %, horizon (hours), benchmark suffix
+    ("sl1_tp2_h12",   1.0,  2.0,  12, "benchmark_1"),
+    ("sl2_tp4_h24",   2.0,  4.0,  24, "benchmark_2"),
+    ("sl3_tp6_h48",   3.0,  6.0,  48, "benchmark_3"),
 )
 
 
@@ -108,7 +110,6 @@ def label_path(times, tf, fine, horizon_minutes, sl_pct, tp_pct, chunk_cells=2_0
     pad = np.full(W, np.nan)
     o, h, l, c = (np.concatenate([fine[k].to_numpy(dtype=float), pad])
                   for k in ("open", "high", "low", "close"))
-    c_ff = pd.Series(c).ffill().to_numpy()
     hw, lw = sliding_window_view(h, W), sliding_window_view(l, W)
 
     start = np.floor((times + tf - fine.index[0]) / res).astype(int).to_numpy()
@@ -140,7 +141,6 @@ def label_path(times, tf, fine, horizon_minutes, sl_pct, tp_pct, chunk_cells=2_0
             dn = np.round((lw[s] / e[:, None] - 1) * 100, 9)
             tp_first = _first(up >= tp_pct, W)
             sl_first = _first(dn <= -sl_pct, W)
-            ret = np.round((c_ff[s + W - 1] / e - 1) * 100, 9)
 
             # Resolve same-minute ties with the intra-candle path.
             tie = (tp_first == sl_first) & (tp_first < W)
@@ -157,7 +157,7 @@ def label_path(times, tf, fine, horizon_minutes, sl_pct, tp_pct, chunk_cells=2_0
                 ties += int(tie.sum())
 
             no_touch = (tp_first == W) & (sl_first == W)
-            lbl[i] = np.where(no_touch, np.where(ret > 0, 2, -2),
+            lbl[i] = np.where(no_touch, 0,
                               np.where(first_is_tp, 1, -1)).astype(float)
 
     labels = pd.DataFrame({"lbl": lbl}, index=times)
@@ -167,7 +167,7 @@ def label_path(times, tf, fine, horizon_minutes, sl_pct, tp_pct, chunk_cells=2_0
 
 
 def make_labels(base, m1, sl_pct, tp_pct, horizon_hours):
-    """Attach four-class labels to every row of `base`; incomplete windows stay NaN."""
+    """Attach three-class labels to every row of `base`; incomplete windows stay NaN."""
     tf = base.index.to_series().diff().median()
     horizon_minutes = int(round(horizon_hours * 60))
     labels, info = label_path(base.index, tf, m1, horizon_minutes, sl_pct, tp_pct)
@@ -176,18 +176,22 @@ def make_labels(base, m1, sl_pct, tp_pct, horizon_hours):
     return labels, info
 
 
-def write_one(base, m1, out_path, sl_pct, tp_pct, horizon_hours, name, match, split):
+def write_one(base, m1, out_path, sl_pct, tp_pct, horizon_hours, name, match, split,
+              setting_name=None):
     labels, info = make_labels(base, m1, sl_pct, tp_pct, horizon_hours)
-    for col in labels.columns:
-        base[col] = labels[col]
+    frame = base.drop(columns=[c for c in base.columns if c.startswith("lbl")],
+                      errors="ignore").copy()
+    frame["lbl"] = labels["lbl"]          # Int64 -> -1 / 0 / 1, blank for pd.NA
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    base.to_csv(out_path, na_rep="")
-    base.drop(columns=list(labels.columns), inplace=True)
+    tmp = out_path.with_name(out_path.name + ".tmp")
+    frame.to_csv(tmp, na_rep="")
+    os.replace(tmp, out_path)
 
     counts = labels["lbl"].map(LABEL_NAMES).value_counts(dropna=False).to_dict()
     meta = {
         "symbol": base.attrs.get("symbol", "symbol5"),
-        "setting": name,
+        "dataset": name,
+        "risk_setting": setting_name or name,
         "timeframe": "5m",
         "split": split,
         "risk": {
@@ -197,9 +201,9 @@ def write_one(base, m1, out_path, sl_pct, tp_pct, horizon_hours, name, match, sp
             "horizon_bars_5m": int(horizon_hours * 12),
             "horizon_minutes": int(horizon_hours * 60),
         },
-        "labels": LABEL_NAMES,
+        "labels": {str(k): v for k, v in LABEL_NAMES.items()},
         "label_columns": ["lbl"],
-        "flat_horizon_rule": "close == entry -> horizon_sl (-2)",
+        "barrier_rule": "first barrier touched inside the window wins; neither barrier touched -> no_hit (0)",
         "tie_break": ("same 1m candle: open beyond a barrier wins; else bullish O->L->H->C "
                       "(SL first) and bearish O->H->L->C (TP first)"),
         "time_convention_check": match,
@@ -220,27 +224,35 @@ def write_one(base, m1, out_path, sl_pct, tp_pct, horizon_hours, name, match, sp
 def build_all(data_dir="data", symbol="symbol5"):
     data_dir = Path(data_dir)
     for split in ("train", "test"):
-        base_path = data_dir / f"{symbol}_5m_{split}.csv"
         minute_path = data_dir / f"{symbol}_1m_{split}.csv"
-        if not base_path.exists() or not minute_path.exists():
-            print(f"skip {split}: missing {base_path.name} or {minute_path.name}")
+        if not minute_path.exists():
+            print(f"skip {split}: missing {minute_path.name}")
             continue
-        print(f"\n[{split}] reading {base_path.name} and {minute_path.name} ...", flush=True)
-        base = read_base(base_path)
-        base.attrs["symbol"] = symbol
+        print(f"\n[{split}] reading {minute_path.name} ...", flush=True)
         m1 = read_minutes(minute_path)
-        match = check_time_convention(base, m1)
-        print(f"[{split}] base/1m close match {match:.1%}" if match is not None else "")
-        for name, sl, tp, hours in SETTINGS:
-            out = data_dir / f"{symbol}_5m_{split}_{name}.csv"
-            write_one(base, m1, out, sl, tp, hours, name, match, split)
-        del base, m1
+        for setting, sl, tp, hours, suffix in SETTINGS:
+            base_path = data_dir / f"{symbol}_5m_{split}_{suffix}.csv"
+            if not base_path.exists():                         # older setting-based name
+                base_path = data_dir / f"{symbol}_5m_{split}_{setting}.csv"
+            if not base_path.exists():
+                print(f"skip {split}/{suffix}: missing {base_path.name}")
+                continue
+            print(f"[{split}] reading {base_path.name} ...", flush=True)
+            base = read_base(base_path)
+            base.attrs["symbol"] = symbol
+            match = check_time_convention(base, m1)
+            print(f"[{split}] base/1m close match {match:.1%}" if match is not None else "")
+            write_one(base, m1, base_path, sl, tp, hours, base_path.stem, match, split,
+                      setting_name=setting)
+            del base
+            gc.collect()
+        del m1
         gc.collect()
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--all", action="store_true", help="build all six 5m train/test datasets")
+    p.add_argument("--all", action="store_true", help="relabel the six 5m benchmark datasets in place")
     p.add_argument("--data-dir", default="data", help="folder containing the csv files")
     p.add_argument("--symbol", default="symbol5", help="file prefix, default symbol5")
     p.add_argument("--base", help="one 5m csv to label (instead of --all)")
