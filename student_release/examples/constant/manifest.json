@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "benchmark_id": "benchmark_1",
+  "entrypoint": "model:Model",
+  "artifacts_dir": "artifacts",
+  "requirements_file": "requirements.txt",
+  "labels": [
+    -1,
+    0,
+    1
+  ]
+}
